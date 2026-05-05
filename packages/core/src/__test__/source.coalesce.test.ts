@@ -148,6 +148,58 @@ describe('coalesceRanges', () => {
     assert.deepEqual(new Uint8Array(result[1]), new Uint8Array([10, 11, 12, 13, 14, 15, 16, 17, 18, 19]));
   });
 
+  it('throws when source.fetch returns fewer bytes than requested', async () => {
+    class TruncatingSource implements Source {
+      url = new URL('memory://truncating');
+      async fetch(_offset: number, length: number): Promise<ArrayBuffer> {
+        const buf = new Uint8Array(length - 1);
+        return buf.buffer as ArrayBuffer;
+      }
+    }
+    const source = new TruncatingSource();
+
+    await assert.rejects(
+      () => coalesceRanges(source, [{ offset: 0, length: 10 }]),
+      /Failed to fetch bytes from offset:0 wanted:10 got:9/,
+    );
+  });
+
+  it('forwards AbortSignal to source.fetch', async () => {
+    const seenSignals: (AbortSignal | undefined)[] = [];
+    class SignalCapturingSource implements Source {
+      url = new URL('memory://signal');
+      async fetch(_offset: number, length: number, options?: { signal?: AbortSignal }): Promise<ArrayBuffer> {
+        seenSignals.push(options?.signal);
+        return new ArrayBuffer(length);
+      }
+    }
+    const source = new SignalCapturingSource();
+    const controller = new AbortController();
+
+    await coalesceRanges(
+      source,
+      [
+        { offset: 0, length: 4 },
+        { offset: 100, length: 4 },
+      ],
+      { coalesce: 8, signal: controller.signal },
+    );
+
+    assert.equal(seenSignals.length, 2);
+    for (const s of seenSignals) assert.equal(s, controller.signal);
+  });
+
+  it('caps in-flight source.fetch calls at 10', async () => {
+    const source = new RecordingSource(makeBuffer(10_000));
+    source.delayTicks = 5;
+
+    const ranges = Array.from({ length: 25 }, (_, i) => ({ offset: i * 200, length: 4 }));
+    await coalesceRanges(source, ranges, { coalesce: 8 });
+
+    assert.equal(source.fetches.length, 25);
+    assert.ok(source.peakInflight <= 10, `expected peakInflight <= 10, got ${source.peakInflight}`);
+  });
+
   it('returns results in input order even when input is out of offset order', async () => {
     const source = new RecordingSource(makeBuffer(256));
     const result = await coalesceRanges(

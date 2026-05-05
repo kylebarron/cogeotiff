@@ -492,6 +492,20 @@ export class TiffImage {
     if (compression == null) compression = Compression.None; // No compression found default ??
     const mimeType = getCompressionMimeType(compression) ?? TiffMimeType.None;
 
+    return this.finalizeTileBytes(bytes, compression, mimeType);
+  }
+
+  /**
+   * Apply compression-specific post-processing to fetched tile bytes.
+   *
+   * Currently this only prepends the JPEG header for JPEG-compressed tiles. Shared between
+   * {@link getBytes} (single tile) and {@link getTiles} (batched).
+   */
+  private finalizeTileBytes(
+    bytes: ArrayBuffer,
+    compression: Compression,
+    mimeType: TiffMimeType,
+  ): { mimeType: TiffMimeType; bytes: ArrayBuffer; compression: Compression } {
     if (compression === Compression.Jpeg) return { mimeType, bytes: this.getJpegHeader(bytes), compression };
     return { mimeType, bytes, compression };
   }

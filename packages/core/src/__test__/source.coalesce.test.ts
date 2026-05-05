@@ -46,4 +46,14 @@ describe('coalesceRanges', () => {
     assert.deepEqual(result, []);
     assert.equal(source.fetches.length, 0);
   });
+
+  it('fetches a single range as one source call', async () => {
+    const source = new RecordingSource(makeBuffer(64));
+    const result = await coalesceRanges(source, [{ offset: 10, length: 5 }]);
+
+    assert.equal(result.length, 1);
+    assert.deepEqual(new Uint8Array(result[0]), new Uint8Array([10, 11, 12, 13, 14]));
+    assert.equal(source.fetches.length, 1);
+    assert.deepEqual(source.fetches[0], { offset: 10, length: 5 });
+  });
 });

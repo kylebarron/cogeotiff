@@ -497,6 +497,62 @@ export class TiffImage {
   }
 
   /**
+   * Read image bytes for multiple ranges in a single batched I/O round trip.
+   *
+   * Vectorized counterpart to {@link getBytes}. Dispatches via {@link Source.fetchRanges} when
+   * the source provides it, otherwise falls back to the internal range-coalescing helper.
+   * Returns one entry per input range, in input order. Sparse ranges (`offset === 0` or
+   * `byteCount === 0`) yield `null`, matching {@link getBytes}.
+   *
+   * @param ranges List of `{offset, byteCount}` byte ranges
+   * @param options Fetch options, plus optional coalescing knobs
+   */
+  async getMultipleBytes(
+    ranges: { offset: number; byteCount: number }[],
+    options?: TiffFetchOptions & { coalesce?: number; maxRangeSize?: number },
+  ): Promise<Array<{ mimeType: TiffMimeType; bytes: ArrayBuffer; compression: Compression } | null>> {
+    if (ranges.length === 0) return [];
+
+    const results = new Array<{ mimeType: TiffMimeType; bytes: ArrayBuffer; compression: Compression } | null>(
+      ranges.length,
+    );
+    const realRanges: { offset: number; length: number }[] = [];
+    const realIndices: number[] = [];
+    for (let i = 0; i < ranges.length; i++) {
+      const r = ranges[i];
+      if (r.offset === 0 || r.byteCount === 0) {
+        results[i] = null;
+      } else {
+        realIndices.push(i);
+        realRanges.push({ offset: r.offset, length: r.byteCount });
+      }
+    }
+
+    if (realRanges.length === 0) return results;
+
+    const source = this.tiff.source;
+    const signal = options?.signal;
+    const fetched = source.fetchRanges
+      ? await source.fetchRanges(realRanges, { signal })
+      : await coalesceRanges(source, realRanges, {
+          coalesce: options?.coalesce,
+          maxRangeSize: options?.maxRangeSize,
+          signal,
+        });
+
+    let compression = this.value(TiffTag.Compression);
+    if (compression == null) compression = Compression.None;
+    const mimeType = getCompressionMimeType(compression) ?? TiffMimeType.None;
+
+    for (let k = 0; k < fetched.length; k++) {
+      const i = realIndices[k];
+      results[i] = this.finalizeTileBytes(fetched[k], compression, mimeType);
+    }
+
+    return results;
+  }
+
+  /**
    * Apply compression-specific post-processing to fetched tile bytes.
    *
    * Currently this only prepends the JPEG header for JPEG-compressed tiles. Shared between
@@ -583,44 +639,10 @@ export class TiffImage {
     }
 
     const sizes = await Promise.all(indices.map((i) => this.getTileSize(i, options)));
-
-    const results = new Array<{ mimeType: TiffMimeType; bytes: ArrayBuffer; compression: Compression } | null>(
-      tiles.length,
+    return this.getMultipleBytes(
+      sizes.map((s) => ({ offset: s.offset, byteCount: s.imageSize })),
+      options,
     );
-    const realRanges: { offset: number; length: number }[] = [];
-    const realIndices: number[] = [];
-    for (let i = 0; i < sizes.length; i++) {
-      const s = sizes[i];
-      if (s.offset === 0 || s.imageSize === 0) {
-        results[i] = null;
-      } else {
-        realIndices.push(i);
-        realRanges.push({ offset: s.offset, length: s.imageSize });
-      }
-    }
-
-    if (realRanges.length > 0) {
-      const source = this.tiff.source;
-      const signal = options?.signal;
-      const fetched = source.fetchRanges
-        ? await source.fetchRanges(realRanges, { signal })
-        : await coalesceRanges(source, realRanges, {
-            coalesce: options?.coalesce,
-            maxRangeSize: options?.maxRangeSize,
-            signal,
-          });
-
-      let compression = this.value(TiffTag.Compression);
-      if (compression == null) compression = Compression.None;
-      const mimeType = getCompressionMimeType(compression) ?? TiffMimeType.None;
-
-      for (let k = 0; k < fetched.length; k++) {
-        const i = realIndices[k];
-        results[i] = this.finalizeTileBytes(fetched[k], compression, mimeType);
-      }
-    }
-
-    return results;
   }
 
   /**
